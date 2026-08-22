@@ -1,11 +1,17 @@
 const mongoose = require('mongoose');
 
 const designSchema = new mongoose.Schema({
-    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    designerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     name: { type: String, required: true },
-    template: { type: String, default: 'tshirt' }, // tshirt, hoodie, etc.
-    designData: { type: String }, // JSON string of canvas elements
+    apparelType: { type: String, default: 'tshirt' },
+    previewImage: { type: String, default: '' },
+    designData: { type: String, default: '{}' },
     linkedInventory: { type: mongoose.Schema.Types.ObjectId, ref: 'Inventory' }
 }, { timestamps: true });
 
-module.exports = mongoose.model('Design', designSchema);
+// Alias user to designerId for backwards compatibility
+designSchema.virtual('user').get(function() {
+    return this.designerId;
+});
+
+module.exports = mongoose.model('Design', designSchema, 'designs');

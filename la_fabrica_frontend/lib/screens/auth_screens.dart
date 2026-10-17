@@ -24,31 +24,10 @@ class _AuthScreenState extends State<AuthScreen> {
   final _passwordController = TextEditingController();
   final _confirmPasswordController = TextEditingController();
 
+  final _inviteCodeController = TextEditingController();
   final _apiService = ApiService();
   bool _isLoading = false;
   String? _errorMessage;
-  List<dynamic> _designers = [];
-  String? _selectedDesignerId;
-
-  @override
-  void initState() {
-    super.initState();
-    if (widget.role == 'inventory' && widget.mode == AuthMode.register) {
-      _fetchDesigners();
-    }
-  }
-
-  Future<void> _fetchDesigners() async {
-    final list = await _apiService.getDesigners();
-    if (mounted) {
-      setState(() {
-        _designers = list;
-        if (list.isNotEmpty) {
-          _selectedDesignerId = list.first['_id'];
-        }
-      });
-    }
-  }
 
   @override
   void dispose() {
@@ -56,6 +35,7 @@ class _AuthScreenState extends State<AuthScreen> {
     _emailController.dispose();
     _passwordController.dispose();
     _confirmPasswordController.dispose();
+    _inviteCodeController.dispose();
     super.dispose();
   }
 
@@ -83,7 +63,7 @@ class _AuthScreenState extends State<AuthScreen> {
         email: _emailController.text.trim(),
         password: _passwordController.text,
         role: widget.role,
-        assignedDesignerId: _selectedDesignerId,
+        inviteCode: widget.role == 'inventory' ? _inviteCodeController.text.trim() : null,
       );
     } else {
       res = await _apiService.login(
@@ -262,22 +242,23 @@ class _AuthScreenState extends State<AuthScreen> {
                             ),
                             const SizedBox(height: 20),
 
-                            if (isRegister && !isDesigner && _designers.isNotEmpty) ...[
-                              const Text('ASSIGNED DESIGNER', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, letterSpacing: 1.2)),
+                            if (isRegister && !isDesigner) ...[
+                              const Text('DESIGNER INVITATION CODE', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, letterSpacing: 1.2)),
                               const SizedBox(height: 8),
-                              DropdownButtonFormField<String>(
-                                value: _selectedDesignerId,
+                              TextFormField(
+                                controller: _inviteCodeController,
+                                textCapitalization: TextCapitalization.characters,
                                 decoration: const InputDecoration(
+                                  hintText: 'e.g. INV-A1B2C3',
                                   border: OutlineInputBorder(borderRadius: BorderRadius.zero),
                                   isDense: true,
                                 ),
-                                items: _designers.map<DropdownMenuItem<String>>((d) {
-                                  return DropdownMenuItem<String>(
-                                    value: d['_id'],
-                                    child: Text('${d['name']} (${d['email']})'),
-                                  );
-                                }).toList(),
-                                onChanged: (val) => setState(() => _selectedDesignerId = val),
+                                validator: (v) {
+                                  if (v == null || v.trim().isEmpty) {
+                                    return 'An invitation code from your designer is required';
+                                  }
+                                  return null;
+                                },
                               ),
                               const SizedBox(height: 20),
                             ],
@@ -292,7 +273,7 @@ class _AuthScreenState extends State<AuthScreen> {
                                 border: OutlineInputBorder(borderRadius: BorderRadius.zero),
                                 isDense: true,
                               ),
-                              validator: (v) => (v == null || v.length < 6) ? 'Password must be at least 6 characters' : null,
+                              validator: (v) => (v == null || v.length < 8) ? 'Password must be at least 8 characters' : null,
                             ),
                             const SizedBox(height: 20),
 

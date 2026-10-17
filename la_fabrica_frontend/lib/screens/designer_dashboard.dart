@@ -18,12 +18,7 @@ class _DesignerDashboardState extends State<DesignerDashboard> {
   String _userName = 'Designer';
   bool _isLoading = false;
 
-  final List<DesignProject> _projects = [
-    DesignProject(name: 'Midnight Collection', type: ApparelType.tshirt, color: const Color(0xff222523), edited: 'Edited 12 min ago'),
-    DesignProject(name: 'Studio Essentials', type: ApparelType.hoodie, color: const Color(0xffd7d1c7), edited: 'Edited yesterday'),
-    DesignProject(name: 'Urban Form', type: ApparelType.sweatshirt, color: const Color(0xff4a5b71), edited: 'Edited Aug 18'),
-    DesignProject(name: 'Minimal 01', type: ApparelType.tshirt, color: const Color(0xffe9dfce), edited: 'Edited Aug 13'),
-  ];
+  final List<DesignProject> _projects = [];
 
   @override
   void initState() {
@@ -43,45 +38,41 @@ class _DesignerDashboardState extends State<DesignerDashboard> {
     setState(() => _isLoading = true);
     final remoteDesigns = await _apiService.getDesigns();
     if (mounted) {
-      if (remoteDesigns.isNotEmpty) {
-        final List<DesignProject> fetched = remoteDesigns.map((d) {
-          final typeStr = d['apparelType'] ?? d['template'] ?? 'tshirt';
-          final type = ApparelType.values.firstWhere(
-            (e) => e.name == typeStr,
-            orElse: () => ApparelType.tshirt,
-          );
-          
-          Color apparelColor = const Color(0xff222523);
-          final rawData = d['designData']?.toString();
-          if (rawData != null && rawData.isNotEmpty && rawData != '{}') {
-            try {
-              final Map<String, dynamic> parsed = jsonDecode(rawData);
-              if (parsed['apparelColor'] != null) {
-                String hex = parsed['apparelColor'].toString().replaceAll('#', '');
-                if (hex.length == 6) hex = 'FF$hex';
-                final val = int.tryParse(hex, radix: 16);
-                if (val != null) apparelColor = Color(val);
-              }
-            } catch (_) {}
-          }
+      final List<DesignProject> fetched = remoteDesigns.map((d) {
+        final typeStr = d['apparelType'] ?? d['template'] ?? 'tshirt';
+        final type = ApparelType.values.firstWhere(
+          (e) => e.name == typeStr,
+          orElse: () => ApparelType.tshirt,
+        );
+        
+        Color apparelColor = const Color(0xff222523);
+        final rawData = d['designData']?.toString();
+        if (rawData != null && rawData.isNotEmpty && rawData != '{}') {
+          try {
+            final Map<String, dynamic> parsed = jsonDecode(rawData);
+            if (parsed['apparelColor'] != null) {
+              String hex = parsed['apparelColor'].toString().replaceAll('#', '');
+              if (hex.length == 6) hex = 'FF$hex';
+              final val = int.tryParse(hex, radix: 16);
+              if (val != null) apparelColor = Color(val);
+            }
+          } catch (_) {}
+        }
 
-          return DesignProject(
-            id: d['_id']?.toString(),
-            name: d['name'] ?? 'Untitled Design',
-            type: type,
-            color: apparelColor,
-            designData: rawData,
-            edited: 'Saved in cloud',
-          );
-        }).toList();
-        setState(() {
-          _projects.clear();
-          _projects.addAll(fetched);
-          _isLoading = false;
-        });
-      } else {
-        setState(() => _isLoading = false);
-      }
+        return DesignProject(
+          id: d['_id']?.toString(),
+          name: d['name'] ?? 'Untitled Design',
+          type: type,
+          color: apparelColor,
+          designData: rawData,
+          edited: 'Saved in cloud',
+        );
+      }).toList();
+      setState(() {
+        _projects.clear();
+        _projects.addAll(fetched);
+        _isLoading = false;
+      });
     }
   }
 
@@ -223,6 +214,76 @@ class _DesignerDashboardState extends State<DesignerDashboard> {
                         const Padding(
                           padding: EdgeInsets.all(40.0),
                           child: Center(child: CircularProgressIndicator(color: Colors.black)),
+                        )
+                      else if (_projects.isEmpty)
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(vertical: 56, horizontal: 24),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(4),
+                            border: Border.all(color: const Color(0xffe2e0d8)),
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Container(
+                                width: 64,
+                                height: 64,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xfff6f5f1),
+                                  borderRadius: BorderRadius.circular(32),
+                                ),
+                                child: const Icon(
+                                  Icons.checkroom_rounded,
+                                  size: 32,
+                                  color: Color(0xff171817),
+                                ),
+                              ),
+                              const SizedBox(height: 20),
+                              const Text(
+                                'NO DESIGNS IN YOUR ARCHIVE',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: 1.5,
+                                  color: Color(0xff74756f),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              const Text(
+                                'Start crafting your garment collection.',
+                                style: TextStyle(
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: -0.5,
+                                  color: Color(0xff171817),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              const Text(
+                                'Create a design for T-Shirts, Hoodies, Sweatshirts, Tank Tops, or Polo Shirts.\nEvery design automatically provisions matching warehouse inventory.',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  color: Color(0xff6e706b),
+                                  height: 1.4,
+                                ),
+                              ),
+                              const SizedBox(height: 28),
+                              ElevatedButton.icon(
+                                onPressed: _createProject,
+                                icon: const Icon(Icons.add, size: 18),
+                                label: const Text('CREATE FIRST DESIGN', style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: 1)),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: const Color(0xff171817),
+                                  foregroundColor: const Color(0xffd9ee57),
+                                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                                  shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+                                ),
+                              ),
+                            ],
+                          ),
                         )
                       else
                         LayoutBuilder(

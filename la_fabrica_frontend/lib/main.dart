@@ -120,20 +120,36 @@ class _ProtectedRouteState extends State<ProtectedRoute> {
       _redirectRoute = widget.requiredRole == 'designer' ? '/designer/login' : '/inventory/login';
       _isAllowed = false;
     } else {
-      final user = await _apiService.getCurrentUser();
-      if (user == null) {
-        // MongoDB session is invalid or deleted -> clear local token & redirect
+      final authResult = await _apiService.verifyCurrentSession();
+      if (authResult.isSessionExpired) {
+        // Session is explicitly invalid or expired (HTTP 401/403) -> clear local token & redirect
         await _apiService.logout();
         _redirectRoute = widget.requiredRole == 'designer' ? '/designer/login' : '/inventory/login';
         _isAllowed = false;
-      } else {
-        final role = user['role']?.toString();
+      } else if (authResult.isNetworkOrServerError) {
+        // Network outage or temporary server error: DO NOT wipe local session.
+        // Preserve user session and check cached role from local storage
+        final cachedRole = await _apiService.getUserRole();
+        if (cachedRole != null && cachedRole == widget.requiredRole) {
+          _isAllowed = true;
+        } else if (cachedRole != null) {
+          _redirectRoute = cachedRole == 'designer' ? '/designer' : '/inventory';
+          _isAllowed = false;
+        } else {
+          _redirectRoute = widget.requiredRole == 'designer' ? '/designer/login' : '/inventory/login';
+          _isAllowed = false;
+        }
+      } else if (authResult.isAuthenticated && authResult.user != null) {
+        final role = authResult.user!['role']?.toString();
         if (role != widget.requiredRole) {
           _redirectRoute = role == 'designer' ? '/designer' : '/inventory';
           _isAllowed = false;
         } else {
           _isAllowed = true;
         }
+      } else {
+        _redirectRoute = widget.requiredRole == 'designer' ? '/designer/login' : '/inventory/login';
+        _isAllowed = false;
       }
     }
 

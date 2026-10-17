@@ -3,7 +3,11 @@ const mongoose = require('mongoose');
 const designSchema = new mongoose.Schema({
     designerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     name: { type: String, required: true },
-    apparelType: { type: String, default: 'tshirt' },
+    apparelType: { 
+        type: String, 
+        enum: ['tshirt', 'hoodie', 'sweatshirt', 'tank', 'polo'], 
+        default: 'tshirt' 
+    },
     previewImage: { type: String, default: '' },
     designData: { type: String, default: '{}' },
     linkedInventory: { type: mongoose.Schema.Types.ObjectId, ref: 'Inventory' }

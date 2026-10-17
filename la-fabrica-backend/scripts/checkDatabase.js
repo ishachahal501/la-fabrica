@@ -1,26 +1,24 @@
 require('dotenv').config({ path: __dirname + '/../.env' });
 const mongoose = require('mongoose');
 
+function redactUri(uri) {
+  try {
+    return uri.replace(/mongodb(\+srv)?:\/\/([^:]+):([^@]+)@/, 'mongodb$1://$2:****@');
+  } catch (_) {
+    return '[REDACTED]';
+  }
+}
+
 async function checkDatabase() {
-  let uri = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/test';
-  const localUri = 'mongodb://127.0.0.1:27017/test';
+  const uri = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/test';
 
   console.log('====================================');
   console.log('LA FABRICA DATABASE HEALTH CHECK');
+  console.log(`Connecting: ${redactUri(uri)}`);
   console.log('====================================');
 
   try {
-    try {
-      await mongoose.connect(uri, { serverSelectionTimeoutMS: 5000 });
-    } catch (e) {
-      if (uri !== localUri) {
-        console.log('Atlas connection warning/timeout. Testing local database instance...');
-        uri = localUri;
-        await mongoose.connect(uri, { serverSelectionTimeoutMS: 5000 });
-      } else {
-        throw e;
-      }
-    }
+    await mongoose.connect(uri, { serverSelectionTimeoutMS: 5000 });
     const dbName = mongoose.connection.name;
     console.log('✓ MongoDB connection');
     console.log(`✓ Database: ${dbName}`);

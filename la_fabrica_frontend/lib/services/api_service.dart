@@ -2,8 +2,25 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+class AuthVerificationResult {
+  final bool isAuthenticated;
+  final bool isSessionExpired; // HTTP 401 or 403
+  final bool isNetworkOrServerError; // 5xx, socket, timeout
+  final Map<String, dynamic>? user;
+
+  const AuthVerificationResult({
+    required this.isAuthenticated,
+    this.isSessionExpired = false,
+    this.isNetworkOrServerError = false,
+    this.user,
+  });
+}
+
 class ApiService {
-  static const String baseUrl = 'http://localhost:5000/api';
+  static const String baseUrl = String.fromEnvironment(
+    'API_BASE_URL',
+    defaultValue: 'http://localhost:5000/api',
+  );
 
   Future<String?> getToken() async {
     final prefs = await SharedPreferences.getInstance();
@@ -33,7 +50,7 @@ class ApiService {
   Future<void> saveUserSession(String token, Map<String, dynamic> user) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('jwt', token);
-    await prefs.setString('userId', user['id'] ?? '');
+    await prefs.setString('userId', (user['id'] ?? user['_id'] ?? '').toString());
     await prefs.setString('userName', user['name'] ?? '');
     await prefs.setString('userEmail', user['email'] ?? '');
     await prefs.setString('userRole', user['role'] ?? 'designer');
@@ -61,9 +78,13 @@ class ApiService {
     await prefs.remove('assignedDesignerId');
   }
 
-  Future<Map<String, dynamic>?> getCurrentUser() async {
+  /// Verifies current session against backend, explicitly distinguishing HTTP 401
+  /// from network outages or server-side issues so temporary outages don't wipe local sessions.
+  Future<AuthVerificationResult> verifyCurrentSession() async {
     final token = await getToken();
-    if (token == null || token.isEmpty) return null;
+    if (token == null || token.isEmpty) {
+      return const AuthVerificationResult(isAuthenticated: false, isSessionExpired: true);
+    }
     try {
       final response = await http.get(
         Uri.parse('$baseUrl/auth/me'),
@@ -80,13 +101,23 @@ class ApiService {
           if (data['assignedDesignerId'] != null) {
             await prefs.setString('assignedDesignerId', data['assignedDesignerId'].toString());
           }
-          return data;
+          return AuthVerificationResult(isAuthenticated: true, user: data);
         }
+      } else if (response.statusCode == 401 || response.statusCode == 403) {
+        return const AuthVerificationResult(isAuthenticated: false, isSessionExpired: true);
+      } else {
+        return const AuthVerificationResult(isAuthenticated: false, isNetworkOrServerError: true);
       }
     } catch (e) {
-      print('getCurrentUser error: $e');
+      print('verifyCurrentSession error: $e');
+      return const AuthVerificationResult(isAuthenticated: false, isNetworkOrServerError: true);
     }
-    return null;
+    return const AuthVerificationResult(isAuthenticated: false, isNetworkOrServerError: true);
+  }
+
+  Future<Map<String, dynamic>?> getCurrentUser() async {
+    final result = await verifyCurrentSession();
+    return result.user;
   }
 
   Future<Map<String, dynamic>> register({
@@ -94,6 +125,7 @@ class ApiService {
     required String email,
     required String password,
     required String role,
+    String? inviteCode,
     String? assignedDesignerId,
   }) async {
     try {
@@ -105,7 +137,8 @@ class ApiService {
           'email': email,
           'password': password,
           'role': role,
-          if (assignedDesignerId != null) 'assignedDesignerId': assignedDesignerId,
+          if (inviteCode != null && inviteCode.isNotEmpty) 'inviteCode': inviteCode,
+          if (assignedDesignerId != null && assignedDesignerId.isNotEmpty) 'assignedDesignerId': assignedDesignerId,
         }),
       );
       final body = json.decode(response.body);
@@ -144,13 +177,66 @@ class ApiService {
   }
 
   Future<List<dynamic>> getDesigners() async {
+    final token = await getToken();
     try {
-      final response = await http.get(Uri.parse('$baseUrl/auth/designers'));
+      final headers = <String, String>{};
+      if (token != null && token.isNotEmpty) {
+        headers['Authorization'] = 'Bearer $token';
+      }
+      final response = await http.get(Uri.parse('$baseUrl/auth/designers'), headers: headers);
       if (response.statusCode == 200) {
         return json.decode(response.body);
       }
     } catch (_) {}
     return [];
+  }
+
+  // --- Invitations API ---
+
+  Future<Map<String, dynamic>> createInvitation({String? invitedEmail}) async {
+    final token = await getToken();
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/auth/invitations'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+        body: json.encode({
+          if (invitedEmail != null && invitedEmail.isNotEmpty) 'invitedEmail': invitedEmail,
+        }),
+      );
+      final body = json.decode(response.body);
+      return {'statusCode': response.statusCode, ...body};
+    } catch (e) {
+      return {'statusCode': 500, 'message': 'Network connection error creating invitation.'};
+    }
+  }
+
+  Future<List<dynamic>> getInvitations() async {
+    final token = await getToken();
+    try {
+      final response = await http.get(
+        Uri.parse('$baseUrl/auth/invitations'),
+        headers: {'Authorization': 'Bearer $token'},
+      );
+      if (response.statusCode == 200) {
+        return json.decode(response.body);
+      }
+    } catch (_) {}
+    return [];
+  }
+
+  Future<Map<String, dynamic>> validateInvitation(String code) async {
+    try {
+      final response = await http.get(
+        Uri.parse('$baseUrl/auth/invitations/validate?code=${Uri.encodeComponent(code)}'),
+      );
+      final body = json.decode(response.body);
+      return {'statusCode': response.statusCode, ...body};
+    } catch (e) {
+      return {'statusCode': 500, 'message': 'Failed to validate invitation.'};
+    }
   }
 
   // --- Designs API ---

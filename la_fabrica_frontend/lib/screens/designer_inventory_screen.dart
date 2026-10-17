@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../services/api_service.dart';
 
 class DesignerInventoryScreen extends StatefulWidget {
@@ -73,6 +74,139 @@ class _DesignerInventoryScreenState extends State<DesignerInventoryScreen> {
       await _apiService.updateInventoryItem(item['_id'], unitPrice: result);
       await _fetchInventory();
     }
+  }
+
+  Future<void> _showInviteStaffDialog() async {
+    final emailController = TextEditingController();
+    String? generatedCode;
+    bool isGenerating = false;
+    String? statusMessage;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          return AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.person_add_alt_1, size: 22),
+                SizedBox(width: 10),
+                Text('Invite Inventory Manager', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+              ],
+            ),
+            content: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Generate an authorized invitation code to grant an inventory manager access to your stock and pricing.',
+                    style: TextStyle(fontSize: 13, color: Color(0xff6e706b)),
+                  ),
+                  const SizedBox(height: 20),
+                  TextField(
+                    controller: emailController,
+                    decoration: const InputDecoration(
+                      labelText: 'Invited Staff Email (Optional)',
+                      hintText: 'staff@example.com',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  if (statusMessage != null) ...[
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xffe8f5e9),
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(color: const Color(0xffc8e6c9)),
+                      ),
+                      child: Text(
+                        statusMessage!,
+                        style: const TextStyle(color: Color(0xff2e7d32), fontSize: 13, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                  ],
+                  if (generatedCode != null) ...[
+                    Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: const Color(0xfff5f5f5),
+                        border: Border.all(color: const Color(0xffe0e0e0)),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('INVITATION CODE', style: TextStyle(fontSize: 10, letterSpacing: 1.2, fontWeight: FontWeight.bold, color: Color(0xff757575))),
+                              const SizedBox(height: 4),
+                              SelectableText(
+                                generatedCode!,
+                                style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, letterSpacing: 2),
+                              ),
+                            ],
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.copy),
+                            tooltip: 'Copy Code',
+                            onPressed: () {
+                              Clipboard.setData(ClipboardData(text: generatedCode!));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Invitation code copied to clipboard!')),
+                              );
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    const Text('Share this code with your staff member to enter during registration.', style: TextStyle(fontSize: 12, color: Color(0xff757575))),
+                  ],
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Close'),
+              ),
+              FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xff171817),
+                  shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+                ),
+                onPressed: isGenerating
+                    ? null
+                    : () async {
+                        setDialogState(() => isGenerating = true);
+                        final res = await _apiService.createInvitation(
+                          invitedEmail: emailController.text.trim().isEmpty ? null : emailController.text.trim(),
+                        );
+                        setDialogState(() {
+                          isGenerating = false;
+                          if (res['code'] != null) {
+                            generatedCode = res['code'];
+                            statusMessage = 'Code active for 7 days!';
+                          } else {
+                            statusMessage = res['message'] ?? 'Failed to generate code';
+                          }
+                        });
+                      },
+                child: isGenerating
+                    ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : const Text('Generate Code'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
   }
 
   Future<void> _logout() async {
@@ -208,10 +342,24 @@ class _DesignerInventoryScreenState extends State<DesignerInventoryScreen> {
                               const Text('Inventory levels and pricing reserved exclusively for your designs.', style: TextStyle(color: Color(0xff6e706b), fontSize: 15)),
                             ],
                           ),
-                          IconButton(
-                            icon: const Icon(Icons.refresh),
-                            onPressed: _fetchInventory,
-                            tooltip: 'Refresh Inventory',
+                          Row(
+                            children: [
+                              FilledButton.icon(
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: const Color(0xff171817),
+                                  shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+                                ),
+                                icon: const Icon(Icons.person_add_alt_1, size: 16),
+                                label: const Text('INVITE STAFF', style: TextStyle(letterSpacing: 1, fontSize: 12, fontWeight: FontWeight.bold)),
+                                onPressed: _showInviteStaffDialog,
+                              ),
+                              const SizedBox(width: 12),
+                              IconButton(
+                                icon: const Icon(Icons.refresh),
+                                onPressed: _fetchInventory,
+                                tooltip: 'Refresh Inventory',
+                              ),
+                            ],
                           ),
                         ],
                       ),

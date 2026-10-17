@@ -60,9 +60,10 @@ class ImageHelper {
 
       final Uint8List pngBytes = byteData.buffer.asUint8List();
 
-      // Safeguard: Check compressed PNG byte limit (max 200KB)
-      if (pngBytes.length > 200 * 1024) {
-        throw Exception('Compressed image is too large (exceeds 200KB limit).');
+      // Safeguard: Check compressed PNG byte limit (MVP limit: 1MB payload capacity)
+      const int maxCompressedSizeBytes = 1024 * 1024;
+      if (pngBytes.length > maxCompressedSizeBytes) {
+        throw Exception('Compressed image is too large (exceeds 1MB limit).');
       }
 
       final String base64Data = base64Encode(pngBytes);

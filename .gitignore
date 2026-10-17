@@ -1,0 +1,23 @@
+# Dependency and build directories
+node_modules/
+.dart_tool/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub/
+.pub-cache/
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.iml
+*.log
+
+# OS-generated files
+.DS_Store
+Thumbs.db

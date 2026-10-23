@@ -1,21 +1,36 @@
 const express = require('express');
 const mongoose = require('mongoose');
+const rateLimit = require('express-rate-limit');
 const Inventory = require('../models/Inventory');
 const Design = require('../models/Design');
 const { protect } = require('../middleware/authMiddleware');
 
 const router = express.Router();
 
+// Throttle authenticated inventory writes.
+// In-memory storage is suitable for a single-instance demo.
+// Use a shared store when deploying multiple backend instances.
+const inventoryWriteLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 120,
+    standardHeaders: true,
+    legacyHeaders: false,
+    skip: () => process.env.NODE_ENV === 'test',
+    message: {
+        message: 'Too many inventory updates. Please wait before trying again.'
+    }
+});
+
 router.use(protect);
 
-// Helper function to resolve targeted designerId for req.user
+// Resolve the designer whose inventory the authenticated user may access.
 const getTargetDesignerId = (user) => {
     if (user.role === 'designer') return user._id;
     if (user.role === 'inventory') return user.assignedDesignerId;
     return null;
 };
 
-// Helper function to format apparel type to human-readable label
+// Format apparel type as a human-readable label.
 function formatApparelLabel(type) {
     switch ((type || '').toLowerCase()) {
         case 'tshirt': return 'T-Shirt';
@@ -27,10 +42,11 @@ function formatApparelLabel(type) {
     }
 }
 
-// GET all inventory items for authenticated user / assigned designer
+// GET all inventory items for the authenticated user / assigned designer.
 router.get('/', async (req, res) => {
     try {
         const designerId = getTargetDesignerId(req.user);
+
         if (!designerId) {
             return res.json([]);
         }
@@ -39,37 +55,77 @@ router.get('/', async (req, res) => {
             .populate('designId', 'name apparelType previewImage')
             .sort({ updatedAt: -1 });
 
-        // Map items to standard output
-        const formatted = items.map(item => ({
-            _id: item._id,
-            designerId: item.designerId,
-            designId: item.designId?._id || item.designId,
-            productName: item.productName || item.designId?.name || 'Apparel Item',
-            apparelType: item.designId?.apparelType || 'tshirt',
-            apparelLabel: formatApparelLabel(item.designId?.apparelType),
-            stockQuantity: item.stockQuantity,
-            unitPrice: item.unitPrice,
-            totalValue: item.stockQuantity * item.unitPrice,
-            createdAt: item.createdAt,
-            updatedAt: item.updatedAt
-        }));
+        const formatted = items.map(item => {
+            const threshold = item.lowStockThreshold || 15;
+            const isCritical = item.stockQuantity === 0;
+            const isLow = item.stockQuantity < threshold;
+            const status = isCritical
+                ? 'critical'
+                : (isLow ? 'low' : 'healthy');
+
+            const targetStock = threshold * 2;
+            const recommendedRestock = Math.max(
+                0,
+                targetStock - item.stockQuantity
+            );
+
+            return {
+                _id: item._id,
+                designerId: item.designerId,
+                designId: item.designId?._id || item.designId,
+                productName:
+                    item.productName ||
+                    item.designId?.name ||
+                    'Apparel Item',
+                apparelType: item.designId?.apparelType || 'tshirt',
+                apparelLabel: formatApparelLabel(
+                    item.designId?.apparelType
+                ),
+                stockQuantity: item.stockQuantity,
+                unitPrice: item.unitPrice,
+                totalValue: item.stockQuantity * item.unitPrice,
+                lowStockThreshold: threshold,
+                stockStatus: status,
+                isLowStock: isLow,
+                isCritical,
+                recommendedRestock,
+                recentChanges: (item.recentChanges || []).slice(0, 10),
+                createdAt: item.createdAt,
+                updatedAt: item.updatedAt
+            };
+        });
 
         res.json(formatted);
     } catch (error) {
-        console.error("GET INVENTORY ERROR:", error);
-        res.status(500).json({ message: 'Error fetching inventory' });
+        console.error('GET INVENTORY ERROR:', error);
+        res.status(500).json({
+            message: 'Error fetching inventory'
+        });
     }
 });
 
-// GET Dashboard summary stats via MongoDB aggregation pipeline
+// GET dashboard summary and stock-health analytics.
 router.get('/dashboard/summary', async (req, res) => {
     try {
         const designerId = getTargetDesignerId(req.user);
+
         if (!designerId) {
-            return res.json({ totalProducts: 0, availableStock: 0, lowStockItems: 0, totalInventoryValue: 0 });
+            return res.json({
+                totalProducts: 0,
+                availableStock: 0,
+                lowStockItems: 0,
+                totalInventoryValue: 0,
+                criticalStockItems: 0,
+                healthyStockItems: 0,
+                stockHealthScore: 100,
+                healthStatus: 'OPTIMAL',
+                replenishmentList: [],
+                recentActivity: []
+            });
         }
 
         const objectId = new mongoose.Types.ObjectId(designerId);
+
         const stats = await Inventory.aggregate([
             { $match: { designerId: objectId } },
             {
@@ -79,57 +135,241 @@ router.get('/dashboard/summary', async (req, res) => {
                     availableStock: { $sum: '$stockQuantity' },
                     lowStockItems: {
                         $sum: {
-                            $cond: [{ $lt: ['$stockQuantity', 10] }, 1, 0]
+                            $cond: [
+                                {
+                                    $lt: [
+                                        '$stockQuantity',
+                                        {
+                                            $ifNull: [
+                                                '$lowStockThreshold',
+                                                15
+                                            ]
+                                        }
+                                    ]
+                                },
+                                1,
+                                0
+                            ]
+                        }
+                    },
+                    criticalStockItems: {
+                        $sum: {
+                            $cond: [
+                                { $eq: ['$stockQuantity', 0] },
+                                1,
+                                0
+                            ]
+                        }
+                    },
+                    healthyStockItems: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $gte: [
+                                        '$stockQuantity',
+                                        {
+                                            $ifNull: [
+                                                '$lowStockThreshold',
+                                                15
+                                            ]
+                                        }
+                                    ]
+                                },
+                                1,
+                                0
+                            ]
                         }
                     },
                     totalInventoryValue: {
-                        $sum: { $multiply: ['$stockQuantity', '$unitPrice'] }
+                        $sum: {
+                            $multiply: [
+                                '$stockQuantity',
+                                '$unitPrice'
+                            ]
+                        }
                     }
                 }
             }
         ]);
 
-        const summary = stats.length > 0 ? {
-            totalProducts: stats[0].totalProducts,
-            availableStock: stats[0].availableStock,
-            lowStockItems: stats[0].lowStockItems,
-            totalInventoryValue: stats[0].totalInventoryValue
-        } : {
-            totalProducts: 0,
-            availableStock: 0,
-            lowStockItems: 0,
-            totalInventoryValue: 0
-        };
+        // Fetch low-stock items for replenishment recommendations.
+        const lowItems = await Inventory.find({
+            designerId: objectId,
+            $expr: {
+                $lt: [
+                    '$stockQuantity',
+                    { $ifNull: ['$lowStockThreshold', 15] }
+                ]
+            }
+        })
+            .populate('designId', 'name apparelType previewImage')
+            .sort({ stockQuantity: 1 })
+            .limit(8);
+
+        const replenishmentList = lowItems.map(item => {
+            const threshold = item.lowStockThreshold || 15;
+
+            return {
+                _id: item._id,
+                designId: item.designId?._id || item.designId,
+                productName:
+                    item.productName ||
+                    item.designId?.name ||
+                    'Apparel Item',
+                apparelType: item.designId?.apparelType || 'tshirt',
+                stockQuantity: item.stockQuantity,
+                unitPrice: item.unitPrice,
+                recommendedRestock: Math.max(
+                    0,
+                    (threshold * 2) - item.stockQuantity
+                ),
+                urgency: item.stockQuantity === 0
+                    ? 'CRITICAL'
+                    : (
+                        item.stockQuantity <= 5
+                            ? 'URGENT'
+                            : 'LOW'
+                    )
+            };
+        });
+
+        // Fetch recent stock movements from embedded inventory history.
+        const recentItems = await Inventory.find({
+            designerId: objectId,
+            'recentChanges.0': { $exists: true }
+        })
+            .populate('designId', 'name apparelType')
+            .select('productName recentChanges designId');
+
+        const recentActivity = [];
+
+        for (const item of recentItems) {
+            for (const change of (item.recentChanges || [])) {
+                recentActivity.push({
+                    inventoryId: item._id,
+                    productName:
+                        item.productName ||
+                        item.designId?.name ||
+                        'Item',
+                    action: change.action,
+                    quantity: change.quantity,
+                    previousStock: change.previousStock,
+                    newStock: change.newStock,
+                    note: change.note,
+                    timestamp: change.timestamp
+                });
+            }
+        }
+
+        recentActivity.sort(
+            (a, b) => new Date(b.timestamp) - new Date(a.timestamp)
+        );
+
+        const baseTotal = stats.length ? stats[0].totalProducts : 0;
+        const lowCount = stats.length ? stats[0].lowStockItems : 0;
+        const critCount = stats.length
+            ? stats[0].criticalStockItems
+            : 0;
+        const healthyCount = stats.length
+            ? stats[0].healthyStockItems
+            : 0;
+
+        let healthScore = 100;
+
+        if (baseTotal > 0) {
+            healthScore = Math.max(
+                0,
+                Math.min(
+                    100,
+                    Math.round((healthyCount / baseTotal) * 100)
+                )
+            );
+        }
+
+        let healthStatus = 'OPTIMAL';
+
+        if (critCount > 0 || healthScore < 50) {
+            healthStatus = 'CRITICAL';
+        } else if (lowCount > 0 || healthScore < 80) {
+            healthStatus = 'ATTENTION NEEDED';
+        }
+
+        const summary = stats.length > 0
+            ? {
+                totalProducts: stats[0].totalProducts,
+                availableStock: stats[0].availableStock,
+                lowStockItems: stats[0].lowStockItems,
+                totalInventoryValue: stats[0].totalInventoryValue,
+                criticalStockItems: critCount,
+                healthyStockItems: healthyCount,
+                stockHealthScore: healthScore,
+                healthStatus,
+                replenishmentList,
+                recentActivity: recentActivity.slice(0, 15)
+            }
+            : {
+                totalProducts: 0,
+                availableStock: 0,
+                lowStockItems: 0,
+                totalInventoryValue: 0,
+                criticalStockItems: 0,
+                healthyStockItems: 0,
+                stockHealthScore: 100,
+                healthStatus: 'OPTIMAL',
+                replenishmentList: [],
+                recentActivity: []
+            };
 
         res.json(summary);
     } catch (error) {
-        console.error("GET DASHBOARD SUMMARY ERROR:", error);
-        res.status(500).json({ message: 'Error fetching summary' });
+        console.error('GET DASHBOARD SUMMARY ERROR:', error);
+        res.status(500).json({
+            message: 'Error fetching summary'
+        });
     }
 });
 
-// GET single inventory item by ID
+// GET one inventory item by ID.
 router.get('/:id', async (req, res) => {
     try {
         if (!mongoose.isValidObjectId(req.params.id)) {
-            return res.status(400).json({ message: 'Invalid inventory ID format' });
+            return res.status(400).json({
+                message: 'Invalid inventory ID format'
+            });
         }
 
-        const item = await Inventory.findById(req.params.id).populate('designId', 'name apparelType');
-        if (!item) return res.status(404).json({ message: 'Inventory item not found' });
+        const item = await Inventory.findById(req.params.id)
+            .populate('designId', 'name apparelType');
+
+        if (!item) {
+            return res.status(404).json({
+                message: 'Inventory item not found'
+            });
+        }
 
         const targetDesignerId = getTargetDesignerId(req.user);
-        if (!targetDesignerId || item.designerId.toString() !== targetDesignerId.toString()) {
-            return res.status(403).json({ message: 'Forbidden: You are not authorized to view this inventory item' });
+
+        if (
+            !targetDesignerId ||
+            item.designerId.toString() !== targetDesignerId.toString()
+        ) {
+            return res.status(403).json({
+                message: 'Forbidden: You are not authorized to view this inventory item'
+            });
         }
 
         res.json({
             _id: item._id,
             designerId: item.designerId,
             designId: item.designId?._id || item.designId,
-            productName: item.productName || item.designId?.name || 'Apparel Item',
+            productName:
+                item.productName ||
+                item.designId?.name ||
+                'Apparel Item',
             apparelType: item.designId?.apparelType || 'tshirt',
-            apparelLabel: formatApparelLabel(item.designId?.apparelType),
+            apparelLabel: formatApparelLabel(
+                item.designId?.apparelType
+            ),
             stockQuantity: item.stockQuantity,
             unitPrice: item.unitPrice,
             totalValue: item.stockQuantity * item.unitPrice,
@@ -138,67 +378,394 @@ router.get('/:id', async (req, res) => {
         });
     } catch (error) {
         if (error.name === 'CastError') {
-            return res.status(400).json({ message: 'Invalid inventory ID format' });
+            return res.status(400).json({
+                message: 'Invalid inventory ID format'
+            });
         }
-        console.error("GET INVENTORY ITEM ERROR:", error);
-        res.status(500).json({ message: 'Error fetching inventory item' });
+
+        console.error('GET INVENTORY ITEM ERROR:', error);
+        res.status(500).json({
+            message: 'Error fetching inventory item'
+        });
     }
 });
 
-// PUT update stock quantity or unit price with strict validation
-router.put('/:id', async (req, res) => {
+// PUT update stock quantity or unit price with concurrency control.
+router.put('/:id', inventoryWriteLimiter, async (req, res) => {
     try {
         if (!mongoose.isValidObjectId(req.params.id)) {
-            return res.status(400).json({ message: 'Invalid inventory ID format' });
+            return res.status(400).json({
+                message: 'Invalid inventory ID format'
+            });
         }
-
-        const { stockQuantity, unitPrice, action, quantity } = req.body;
-        const item = await Inventory.findById(req.params.id);
-        if (!item) return res.status(404).json({ message: 'Inventory item not found' });
 
         const targetDesignerId = getTargetDesignerId(req.user);
-        if (!targetDesignerId || item.designerId.toString() !== targetDesignerId.toString()) {
-            return res.status(403).json({ message: 'Forbidden: You are not authorized to modify this inventory item' });
+
+        if (!targetDesignerId) {
+            return res.status(403).json({
+                message: 'Forbidden: You are not authorized to modify inventory'
+            });
         }
 
-        // Validate action if specified
-        if (action !== undefined) {
-            if (action !== 'add' && action !== 'reduce') {
-                return res.status(400).json({ message: 'Invalid action. Action must be "add" or "reduce"' });
-            }
-            if (quantity === undefined) {
-                return res.status(400).json({ message: 'Quantity is required when action is specified' });
-            }
-            const numQty = Number(quantity);
-            if (!Number.isInteger(numQty) || numQty <= 0) {
-                return res.status(400).json({ message: 'Quantity must be a positive integer' });
+        // Load current record for ownership and version checks.
+        const currentItem = await Inventory.findById(req.params.id);
+
+        if (!currentItem) {
+            return res.status(404).json({
+                message: 'Inventory item not found'
+            });
+        }
+
+        if (
+            currentItem.designerId.toString() !==
+            targetDesignerId.toString()
+        ) {
+            return res.status(403).json({
+                message: 'Forbidden: You are not authorized to modify this inventory item'
+            });
+        }
+
+        const {
+            stockQuantity,
+            unitPrice,
+            action,
+            quantity,
+            expectedVersion,
+            version,
+            note
+        } = req.body;
+
+        const requestedVersion = expectedVersion !== undefined
+            ? expectedVersion
+            : version;
+
+        // Compare-and-swap: prevent overwriting a record changed by
+        // another request after it was read.
+        const filter = {
+            _id: req.params.id,
+            designerId: targetDesignerId
+        };
+
+        let expectedVersionForWrite;
+
+        if (requestedVersion !== undefined) {
+            const vNum = Number(requestedVersion);
+
+            if (!Number.isInteger(vNum) || vNum < 0) {
+                return res.status(400).json({
+                    message: 'Version must be a non-negative integer'
+                });
             }
 
-            if (action === 'add') {
-                item.stockQuantity += numQty;
-            } else if (action === 'reduce') {
-                item.stockQuantity = Math.max(0, item.stockQuantity - numQty);
-            }
+            expectedVersionForWrite = vNum;
         } else {
+            expectedVersionForWrite = Number.isInteger(currentItem.__v)
+                ? currentItem.__v
+                : null;
+        }
+
+        if (expectedVersionForWrite !== null) {
+            filter.__v = expectedVersionForWrite;
+        } else {
+            // Support older documents without a version field.
+            filter.$or = [
+                { __v: { $exists: false } },
+                { __v: null }
+            ];
+        }
+
+        let updatePipeline;
+
+        if (action !== undefined) {
+            // Relative stock adjustment: add or reduce.
+            if (action !== 'add' && action !== 'reduce') {
+                return res.status(400).json({
+                    message: 'Invalid action. Action must be "add" or "reduce"'
+                });
+            }
+
+            if (quantity === undefined) {
+                return res.status(400).json({
+                    message: 'Quantity is required when action is specified'
+                });
+            }
+
+            const numQty = Number(quantity);
+
+            if (!Number.isInteger(numQty) || numQty <= 0) {
+                return res.status(400).json({
+                    message: 'Quantity must be a positive integer'
+                });
+            }
+
+            if (action === 'reduce') {
+                if (currentItem.stockQuantity < numQty) {
+                    return res.status(400).json({
+                        message: `Insufficient stock: requested reduction of ${numQty} exceeds available stock (${currentItem.stockQuantity})`,
+                        availableStock: currentItem.stockQuantity
+                    });
+                }
+
+                // Enforce the stock boundary inside the atomic update too.
+                filter.stockQuantity = { $gte: numQty };
+            }
+
+            const delta = action === 'add' ? numQty : -numQty;
+
+            const logNote = note || (
+                action === 'add'
+                    ? `Replenished +${numQty} units`
+                    : `Dispatched -${numQty} units`
+            );
+
+            updatePipeline = [
+                {
+                    $set: {
+                        __v: {
+                            $add: [
+                                { $ifNull: ['$__v', 0] },
+                                1
+                            ]
+                        },
+                        stockQuantity: {
+                            $add: ['$stockQuantity', delta]
+                        },
+                        recentChanges: {
+                            $slice: [
+                                {
+                                    $concatArrays: [
+                                        [{
+                                            action,
+                                            quantity: numQty,
+                                            previousStock: '$stockQuantity',
+                                            newStock: {
+                                                $add: [
+                                                    '$stockQuantity',
+                                                    delta
+                                                ]
+                                            },
+                                            note: logNote,
+                                            timestamp: '$$NOW'
+                                        }],
+                                        {
+                                            $ifNull: [
+                                                '$recentChanges',
+                                                []
+                                            ]
+                                        }
+                                    ]
+                                },
+                                25
+                            ]
+                        },
+                        updatedAt: '$$NOW'
+                    }
+                }
+            ];
+        } else {
+            // Absolute updates: stockQuantity, unitPrice, lowStockThreshold.
+            let hasChanges = false;
+
+            const setStage = {
+                __v: {
+                    $add: [
+                        { $ifNull: ['$__v', 0] },
+                        1
+                    ]
+                },
+                updatedAt: '$$NOW'
+            };
+
             if (stockQuantity !== undefined) {
                 const numStock = Number(stockQuantity);
+
                 if (!Number.isInteger(numStock) || numStock < 0) {
-                    return res.status(400).json({ message: 'stockQuantity must be a non-negative integer' });
+                    return res.status(400).json({
+                        message: 'stockQuantity must be a non-negative integer'
+                    });
                 }
-                item.stockQuantity = numStock;
+
+                setStage.stockQuantity = numStock;
+
+                setStage.recentChanges = {
+                    $cond: {
+                        if: { $ne: ['$stockQuantity', numStock] },
+                        then: {
+                            $slice: [
+                                {
+                                    $concatArrays: [
+                                        [{
+                                            action: 'set',
+                                            quantity: {
+                                                $abs: {
+                                                    $subtract: [
+                                                        numStock,
+                                                        '$stockQuantity'
+                                                    ]
+                                                }
+                                            },
+                                            previousStock: '$stockQuantity',
+                                            newStock: numStock,
+                                            note: note ||
+                                                `Manual adjustment to ${numStock} units`,
+                                            timestamp: '$$NOW'
+                                        }],
+                                        {
+                                            $ifNull: [
+                                                '$recentChanges',
+                                                []
+                                            ]
+                                        }
+                                    ]
+                                },
+                                25
+                            ]
+                        },
+                        else: {
+                            $ifNull: ['$recentChanges', []]
+                        }
+                    }
+                };
+
+                hasChanges = true;
             }
 
             if (unitPrice !== undefined) {
                 const numPrice = Number(unitPrice);
+
                 if (!Number.isFinite(numPrice) || numPrice < 0) {
-                    return res.status(400).json({ message: 'unitPrice must be a non-negative finite number' });
+                    return res.status(400).json({
+                        message: 'unitPrice must be a non-negative finite number'
+                    });
                 }
-                item.unitPrice = numPrice;
+
+                setStage.unitPrice = numPrice;
+                hasChanges = true;
             }
+
+            if (req.body.lowStockThreshold !== undefined) {
+                const numThresh = Number(req.body.lowStockThreshold);
+
+                if (!Number.isInteger(numThresh) || numThresh < 1) {
+                    return res.status(400).json({
+                        message: 'lowStockThreshold must be an integer >= 1'
+                    });
+                }
+
+                setStage.lowStockThreshold = numThresh;
+                hasChanges = true;
+            }
+
+            if (!hasChanges) {
+                return res.status(400).json({
+                    message: 'No valid update fields provided'
+                });
+            }
+
+            updatePipeline = [{ $set: setStage }];
         }
 
-        const updatedItem = await item.save();
-        res.json({
+
+        // Execute atomic update. Retry stale-version conflicts for
+        // relative stock adjustments; keep absolute edits conflict-safe.
+        let updatedItem = null;
+        const maxAttempts = action !== undefined ? 5 : 1;
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            updatedItem = await Inventory.findOneAndUpdate(
+                filter,
+                updatePipeline,
+                { returnDocument: 'after', updatePipeline: true }
+            );
+
+            if (updatedItem) {
+                break;
+            }
+
+            const latestDoc = await Inventory.findOne({
+                _id: req.params.id,
+                designerId: targetDesignerId
+            });
+
+            if (!latestDoc) {
+                return res.status(404).json({
+                    message: 'Inventory item no longer exists'
+                });
+            }
+
+            const versionChanged =
+                expectedVersionForWrite !== null
+                    ? latestDoc.__v !== expectedVersionForWrite
+                    : Number.isInteger(latestDoc.__v);
+
+            // Retry relative adjustments after refreshing the version filter.
+            if (
+                versionChanged &&
+                action !== undefined &&
+                attempt < maxAttempts - 1
+            ) {
+                expectedVersionForWrite = Number.isInteger(latestDoc.__v)
+                    ? latestDoc.__v
+                    : null;
+
+                if (expectedVersionForWrite !== null) {
+                    filter.__v = expectedVersionForWrite;
+                    delete filter.$or;
+                } else {
+                    delete filter.__v;
+                    filter.$or = [
+                        { __v: { $exists: false } },
+                        { __v: null }
+                    ];
+                }
+
+                // Recheck stock after a concurrent reduction.
+                if (
+                    action === 'reduce' &&
+                    latestDoc.stockQuantity < Number(quantity)
+                ) {
+                    return res.status(400).json({
+                        message: `Insufficient stock: only ${latestDoc.stockQuantity} units available`,
+                        availableStock: latestDoc.stockQuantity
+                    });
+                }
+
+                continue;
+            }
+
+            if (
+                action === 'reduce' &&
+                latestDoc.stockQuantity < Number(quantity)
+            ) {
+                return res.status(400).json({
+                    message: `Insufficient stock: only ${latestDoc.stockQuantity} units available`,
+                    availableStock: latestDoc.stockQuantity
+                });
+            }
+
+            if (versionChanged) {
+                return res.status(409).json({
+                    message: 'Conflict: Stale version detected. The inventory record has been modified concurrently. Refresh and retry.',
+                    currentVersion: latestDoc.__v,
+                    expectedVersion: expectedVersionForWrite
+                });
+            }
+
+            return res.status(409).json({
+                message: 'Concurrent update conflict. Please retry your request with latest inventory state.',
+                currentStock: latestDoc.stockQuantity,
+                currentVersion: latestDoc.__v
+            });
+        }
+
+        if (!updatedItem) {
+            return res.status(409).json({
+                message: 'Inventory changed repeatedly. Please retry.'
+            });
+        }
+
+
+        return res.json({
             _id: updatedItem._id,
             designerId: updatedItem.designerId,
             designId: updatedItem.designId,
@@ -206,14 +773,22 @@ router.put('/:id', async (req, res) => {
             stockQuantity: updatedItem.stockQuantity,
             unitPrice: updatedItem.unitPrice,
             totalValue: updatedItem.stockQuantity * updatedItem.unitPrice,
+            lowStockThreshold: updatedItem.lowStockThreshold || 15,
+            recentChanges: updatedItem.recentChanges || [],
+            __v: updatedItem.__v,
             updatedAt: updatedItem.updatedAt
         });
     } catch (error) {
         if (error.name === 'CastError') {
-            return res.status(400).json({ message: 'Invalid inventory ID format' });
+            return res.status(400).json({
+                message: 'Invalid inventory ID format'
+            });
         }
-        console.error("UPDATE INVENTORY ERROR:", error);
-        res.status(500).json({ message: 'Error updating inventory' });
+
+        console.error('UPDATE INVENTORY ERROR:', error);
+        return res.status(500).json({
+            message: 'Error updating inventory'
+        });
     }
 });
 

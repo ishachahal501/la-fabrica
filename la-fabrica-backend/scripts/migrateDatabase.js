@@ -91,6 +91,21 @@ async function migrateDatabase() {
       console.log('✓ Cleaned up orphan inventory records.');
     }
 
+    // 4. Ensure TTL indexes and schema indexes are synchronized
+    const Invitation = require('../models/Invitation');
+    const Inventory = require('../models/Inventory');
+    const User = require('../models/User');
+    const Design = require('../models/Design');
+
+    console.log('Synchronizing schema indexes...');
+    await Promise.all([
+      Invitation.syncIndexes(),
+      Inventory.syncIndexes(),
+      User.syncIndexes(),
+      Design.syncIndexes()
+    ]);
+    console.log('✓ TTL index (expiresAt: 1, expireAfterSeconds: 0) and unique indexes synchronized.');
+
     await mongoose.disconnect();
     console.log('✓ Migration successfully completed.');
   } catch (err) {

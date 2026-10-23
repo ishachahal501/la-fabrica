@@ -355,6 +355,8 @@ class ApiService {
     double? unitPrice,
     String? action,
     int? quantity,
+    String? note,
+    int? lowStockThreshold,
   }) async {
     final token = await getToken();
     try {
@@ -369,6 +371,8 @@ class ApiService {
           if (unitPrice != null) 'unitPrice': unitPrice,
           if (action != null) 'action': action,
           if (quantity != null) 'quantity': quantity,
+          if (note != null) 'note': note,
+          if (lowStockThreshold != null) 'lowStockThreshold': lowStockThreshold,
         }),
       );
       return json.decode(response.body);

@@ -9,6 +9,10 @@ class ApparelMockup extends StatelessWidget {
     this.child,
     this.large = false,
     this.showPrintAreaBorder = false,
+    this.transparentGarment = false,
+    this.showGuides = false,
+    this.snapActiveX = false,
+    this.snapActiveY = false,
   });
 
   final ApparelType type;
@@ -16,6 +20,10 @@ class ApparelMockup extends StatelessWidget {
   final Widget? child;
   final bool large;
   final bool showPrintAreaBorder;
+  final bool transparentGarment;
+  final bool showGuides;
+  final bool snapActiveX;
+  final bool snapActiveY;
 
   @override
   Widget build(BuildContext context) {
@@ -33,24 +41,57 @@ class ApparelMockup extends StatelessWidget {
       child: Stack(
         alignment: Alignment.topCenter,
         children: [
-          CustomPaint(
-            size: Size(width, height),
-            painter: _ApparelVectorPainter(type: type, color: color),
-          ),
+          if (!transparentGarment)
+            CustomPaint(
+              size: Size(width, height),
+              painter: _ApparelVectorPainter(type: type, color: color),
+            ),
           Positioned(
             top: printTop,
             child: Container(
               width: printWidth,
               height: printHeight,
-              decoration: showPrintAreaBorder
+              decoration: showPrintAreaBorder && !transparentGarment
                   ? BoxDecoration(
                       border: Border.all(
-                        color: const Color(0x44d9ee57),
-                        width: 1.5,
+                        color: const Color(0x55d9ee57),
+                        width: 1.2,
                       ),
                     )
                   : null,
-              child: child,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  // Subtle alignment guide crosshairs when enabled
+                  if (showGuides && !transparentGarment) ...[
+                    // Center vertical guide
+                    Positioned(
+                      left: printWidth / 2 - 0.5,
+                      top: 0,
+                      bottom: 0,
+                      child: Container(
+                        width: 1,
+                        color: snapActiveX 
+                            ? const Color(0xffd9ee57) 
+                            : const Color(0x22ffffff),
+                      ),
+                    ),
+                    // Center horizontal guide
+                    Positioned(
+                      top: printHeight / 2 - 0.5,
+                      left: 0,
+                      right: 0,
+                      child: Container(
+                        height: 1,
+                        color: snapActiveY 
+                            ? const Color(0xffd9ee57) 
+                            : const Color(0x22ffffff),
+                      ),
+                    ),
+                  ],
+                  ?child,
+                ],
+              ),
             ),
           ),
         ],

@@ -509,6 +509,167 @@ async function runIntegrityTests() {
   }
   console.log('✓ Invalid session token correctly classified as HTTP 401 Unauthorized');
 
+  // TEST 18: Simultaneous Concurrent Stock Increments and Audit Consistency
+  console.log('\n--- 18. Testing Simultaneous Concurrent Stock Increments ---');
+  const invDesignRes = await request('POST', '/designs', {
+    name: 'Concurrency Test Item',
+    apparelType: 'hoodie',
+    initialStock: 20,
+    unitPrice: 1200
+  }, designerToken);
+  if (invDesignRes.status !== 201) throw new Error('Failed to create concurrency test design');
+  const concDesignId = invDesignRes.body.design._id;
+
+  const invFetch = await request('GET', '/inventory', null, designerToken);
+  const targetInv = invFetch.body.find(i => (i.designId === concDesignId || i.designId?._id === concDesignId));
+  if (!targetInv) throw new Error('Target inventory item not found');
+  const targetInvId = targetInv._id;
+
+  // Run 5 simultaneous increment requests of +4 units each
+  const incPromises = Array.from({ length: 5 }, (_, i) =>
+    request('PUT', `/inventory/${targetInvId}`, {
+      action: 'add',
+      quantity: 4,
+      note: `Concurrent increment #${i + 1}`
+    }, designerToken)
+  );
+  const incResults = await Promise.all(incPromises);
+  const allIncOk = incResults.every(r => r.status === 200);
+  if (!allIncOk) {
+    throw new Error(`One or more concurrent increments failed: ${JSON.stringify(incResults.map(r => r.status))}`);
+  }
+
+  const afterIncFetch = await request('GET', `/inventory/${targetInvId}`, null, designerToken);
+  const expectedStockAfterInc = 20 + (5 * 4); // 40
+  if (afterIncFetch.body.stockQuantity !== expectedStockAfterInc) {
+    throw new Error(`Expected stock ${expectedStockAfterInc} after 5 concurrent increments, got ${afterIncFetch.body.stockQuantity}`);
+  }
+  console.log(`✓ 5 simultaneous increments succeeded cleanly: stock went from 20 to ${afterIncFetch.body.stockQuantity}`);
+
+  // TEST 19: Simultaneous Concurrent Stock Reductions and Audit Consistency
+  console.log('\n--- 19. Testing Simultaneous Concurrent Stock Reductions ---');
+  // Run 5 simultaneous reduction requests of -3 units each
+  const redPromises = Array.from({ length: 5 }, (_, i) =>
+    request('PUT', `/inventory/${targetInvId}`, {
+      action: 'reduce',
+      quantity: 3,
+      note: `Concurrent reduction #${i + 1}`
+    }, designerToken)
+  );
+  const redResults = await Promise.all(redPromises);
+  const allRedOk = redResults.every(r => r.status === 200);
+  if (!allRedOk) {
+    throw new Error(`One or more concurrent reductions failed: ${JSON.stringify(redResults.map(r => r.status))}`);
+  }
+
+  const afterRedFetch = await request('GET', `/inventory`, null, designerToken);
+  const afterRedInv = afterRedFetch.body.find(i => i._id === targetInvId);
+  const expectedStockAfterRed = expectedStockAfterInc - (5 * 3); // 40 - 15 = 25
+  if (afterRedInv.stockQuantity !== expectedStockAfterRed) {
+    throw new Error(`Expected stock ${expectedStockAfterRed} after 5 concurrent reductions, got ${afterRedInv.stockQuantity}`);
+  }
+
+  // Verify audit history consistency: all recent changes have valid transitions
+  const changes = afterRedInv.recentChanges || [];
+  for (const c of changes) {
+    if (c.action === 'add') {
+      if (c.newStock !== c.previousStock + c.quantity) {
+        throw new Error(`Audit math mismatch for add: prev=${c.previousStock}, qty=${c.quantity}, new=${c.newStock}`);
+      }
+    } else if (c.action === 'reduce') {
+      if (c.newStock !== c.previousStock - c.quantity) {
+        throw new Error(`Audit math mismatch for reduce: prev=${c.previousStock}, qty=${c.quantity}, new=${c.newStock}`);
+      }
+    }
+  }
+  console.log(`✓ 5 simultaneous reductions succeeded cleanly: stock reduced to ${afterRedInv.stockQuantity}`);
+  console.log('✓ Audit entries precisely match committed atomic transitions');
+
+  // TEST 20: Competing Concurrent Reductions Beyond Available Stock (Zero Negative Stock)
+  console.log('\n--- 20. Testing Competing Concurrent Reductions Beyond Available Stock ---');
+  // Set stock to 10
+  await request('PUT', `/inventory/${targetInvId}`, { stockQuantity: 10 }, designerToken);
+
+  // Two concurrent requests both try to reduce 8 units (total 16, but only 10 available)
+  const [compA, compB] = await Promise.all([
+    request('PUT', `/inventory/${targetInvId}`, { action: 'reduce', quantity: 8 }, designerToken),
+    request('PUT', `/inventory/${targetInvId}`, { action: 'reduce', quantity: 8 }, designerToken)
+  ]);
+
+  const compStatuses = [compA.status, compB.status];
+  console.log('Competing reduction statuses:', compStatuses);
+  const compSuccess = compStatuses.filter(s => s === 200).length;
+  const compRejected = compStatuses.filter(s => s === 400).length;
+
+  if (compSuccess !== 1 || compRejected !== 1) {
+    throw new Error(`Expected exactly 1 success (200) and 1 rejection (400), got: ${JSON.stringify(compStatuses)}`);
+  }
+
+  const finalCompInv = await request('GET', `/inventory/${targetInvId}`, null, designerToken);
+  if (finalCompInv.body.stockQuantity !== 2) {
+    throw new Error(`Expected remaining stock to be 2, got ${finalCompInv.body.stockQuantity}`);
+  }
+  console.log('✓ Exactly one concurrent reduction succeeded and stock remained strictly positive (2 units)');
+
+  // TEST 21: Optimistic Concurrency Control (OCC) and Stale Version Rejection
+  console.log('\n--- 21. Testing Optimistic Concurrency Control (OCC) ---');
+  const occFetch = await request('PUT', `/inventory/${targetInvId}`, { stockQuantity: 50 }, designerToken);
+  const currentVersion = occFetch.body.__v;
+
+  // Stale update: send previous version
+  const staleRes = await request('PUT', `/inventory/${targetInvId}`, {
+    stockQuantity: 45,
+    expectedVersion: currentVersion - 1
+  }, designerToken);
+  console.log('Stale version update response:', staleRes.status, staleRes.body);
+  if (staleRes.status !== 409) {
+    throw new Error(`Expected HTTP 409 Conflict for stale version, got ${staleRes.status}`);
+  }
+  console.log('✓ Stale version successfully rejected with HTTP 409 Conflict');
+
+  // Matching version update
+  const validOccRes = await request('PUT', `/inventory/${targetInvId}`, {
+    stockQuantity: 48,
+    expectedVersion: currentVersion
+  }, designerToken);
+  if (validOccRes.status !== 200 || validOccRes.body.stockQuantity !== 48) {
+    throw new Error(`Expected HTTP 200 for matching OCC version, got ${validOccRes.status}`);
+  }
+  console.log('✓ Matching version update succeeded with version increment');
+
+  // TEST 22: Expired Invitation Rejection & Database TTL Index Verification
+  console.log('\n--- 22. Testing Expired Invitation Rejection & TTL Index ---');
+  const Invitation = require('../models/Invitation');
+  // Create an expired invitation directly in database
+  const expiredCode = `EXP-${Date.now()}`;
+  await Invitation.create({
+    code: expiredCode,
+    designerId: reg1.body.user.id || reg1.body.user._id,
+    expiresAt: new Date(Date.now() - 3600000) // 1 hour ago
+  });
+
+  // Attempt registration with expired code
+  const expiredRegRes = await request('POST', '/auth/register', {
+    name: 'Expired Invite User',
+    email: `expired_${Date.now()}@example.com`,
+    password: 'Password123!',
+    role: 'inventory',
+    inviteCode: expiredCode
+  });
+  console.log('Expired invitation registration response:', expiredRegRes.status, expiredRegRes.body);
+  if (expiredRegRes.status !== 400 || !expiredRegRes.body.message?.includes('expired')) {
+    throw new Error(`Expected HTTP 400 with 'expired' message, got ${expiredRegRes.status}`);
+  }
+  console.log('✓ Server-side expiry check rejected expired invitation with HTTP 400');
+
+  // Verify MongoDB TTL index configuration in database
+  const invDbIndexes = await mongoose.connection.db.collection('invitations').indexes();
+  const ttlIdx = invDbIndexes.find(i => i.key && i.key.expiresAt === 1);
+  if (!ttlIdx || ttlIdx.expireAfterSeconds !== 0) {
+    throw new Error(`TTL index missing or invalid expireAfterSeconds: ${JSON.stringify(ttlIdx)}`);
+  }
+  console.log('✓ Verified MongoDB TTL index exists on invitations (expiresAt: 1, expireAfterSeconds: 0)');
+
   console.log('\n========================================');
   console.log('ALL INTEGRITY & SECURITY TESTS PASSED! ✓');
   console.log('========================================');

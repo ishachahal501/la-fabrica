@@ -83,6 +83,18 @@ async function startServer() {
   console.log('MongoDB connected successfully');
   console.log(`Database: ${mongoose.connection.name}`);
 
+  try {
+    const Invitation = require('./models/Invitation');
+    const Inventory = require('./models/Inventory');
+    await Promise.all([
+      Invitation.syncIndexes(),
+      Inventory.syncIndexes()
+    ]);
+    console.log('✓ Database schema and TTL indexes verified');
+  } catch (idxErr) {
+    console.warn('Index verification notice:', idxErr.message);
+  }
+
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });
